@@ -40,8 +40,7 @@ gcc --version
 Clone the client and server repositories separately:
 
 ```bash
-git clone <CLIENT_REPOSITORY_URL>
-git clone <SERVER_REPOSITORY_URL>
+git clone https://github.com/TheBlueDestroyer19/p2p-architecture
 ```
 
 Enter the appropriate repository when building or running either component.
