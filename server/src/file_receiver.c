@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-
+#include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -60,14 +60,21 @@ int file_receiver_init(FileReceiver *receiver) {
 /*
  * Begin receiving a new file.
  */
+
+/*
+ * Begin receiving a new file.
+ * The transaction ID is appended to the destination filename.
+ */
 int file_receiver_begin(
     FileReceiver *receiver,
-    const FileMetadata *metadata
+    const FileMetadata *metadata,
+    uint64_t transfer_id
 ) {
 
     if (receiver == NULL || metadata == NULL ||
         receiver->directory_fd < 0 ||
-        receiver->active)
+        receiver->active ||
+        transfer_id == 0)
         return -1;
 
     size_t filename_length =
@@ -82,6 +89,9 @@ int file_receiver_begin(
         return -1;
     }
 
+    /*
+     * Validate the original filename.
+     */
     for (size_t i = 0; i < filename_length; i++) {
 
         unsigned char ch =
@@ -96,12 +106,64 @@ int file_receiver_begin(
     }
 
     /*
+     * Identify the extension.
+     *
+     * Examples:
+     * report.pdf       -> .pdf
+     * archive.tar.gz   -> .gz
+     * README           -> no extension
+     * .env             -> no extension
+     */
+    const char *extension =
+        strrchr(metadata->filename, '.');
+
+    if (extension == NULL ||
+        extension == metadata->filename ||
+        extension[1] == '\0') {
+
+        extension = NULL;
+    }
+
+    size_t base_length = extension
+        ? (size_t)(extension - metadata->filename)
+        : filename_length;
+
+    /*
+     * Generate the destination filename.
+     *
+     * Example:
+     * report.pdf
+     * ->
+     * report_00000000a1b2c3d4.pdf
+     */
+    char stored_filename[STORED_FILENAME_MAX_LENGTH + 1];
+
+    int name_length = snprintf(
+        stored_filename,
+        sizeof(stored_filename),
+        "%.*s_%016llx%s",
+        (int)base_length,
+        metadata->filename,
+        (unsigned long long)transfer_id,
+        extension ? extension : ""
+    );
+
+    if (name_length < 0 ||
+        name_length > STORED_FILENAME_MAX_LENGTH) {
+
+        fprintf(stderr, "Generated filename is too long.\n");
+        return -1;
+    }
+
+    /*
+     * Create destination file.
+     *
      * O_EXCL prevents overwriting existing files.
      * O_NOFOLLOW prevents following symbolic links.
      */
     int fd = openat(
         receiver->directory_fd,
-        metadata->filename,
+        stored_filename,
         O_WRONLY | O_CREAT | O_EXCL |
         O_NOFOLLOW | O_CLOEXEC,
         0600
@@ -126,11 +188,7 @@ int file_receiver_begin(
         close(receiver->file_fd);
         receiver->file_fd = -1;
 
-        unlinkat(
-            receiver->directory_fd,
-            metadata->filename,
-            0
-        );
+        unlinkat(receiver->directory_fd, stored_filename, 0);
 
         return -1;
     }
@@ -149,25 +207,26 @@ int file_receiver_begin(
         close(receiver->file_fd);
         receiver->file_fd = -1;
 
-        unlinkat(
-            receiver->directory_fd,
-            metadata->filename,
-            0
-        );
+        unlinkat(receiver->directory_fd, stored_filename, 0);
 
         return -1;
     }
 
+    /*
+     * Initialize receiver state.
+     */
     receiver->expected_size = metadata->file_size;
     receiver->received_size = 0;
 
     memcpy(
         receiver->filename,
-        metadata->filename,
-        filename_length + 1
+        stored_filename,
+        (size_t)name_length + 1
     );
 
     receiver->active = 1;
+
+    printf("Original filename: %s\n", metadata->filename);
 
     printf("Created destination file: %s/%s\n",
            RECEIVED_DIRECTORY,
@@ -175,6 +234,7 @@ int file_receiver_begin(
 
     return 0;
 }
+
 
 
 /*

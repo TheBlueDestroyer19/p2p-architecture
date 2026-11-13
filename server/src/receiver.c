@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -9,6 +8,7 @@
 #include "transfer.h"
 #include "metadata.h"
 #include "file_receiver.h"
+#include "connection_manager.h"
 
 
 /*
@@ -19,7 +19,6 @@ static int send_ack(
     uint64_t transfer_id,
     uint32_t sequence_number
 ) {
-
     Packet ack = {0};
 
     ack.header.version = PROTOCOL_VERSION;
@@ -35,8 +34,11 @@ static int send_ack(
 
 /*
  * Main receiving loop for one connected client.
+ *
+ * Each worker invokes this function independently.
+ * slot_id identifies the client's connection-table entry.
  */
-int receive_loop(int client_fd) {
+int receive_loop(int client_fd, int slot_id) {
 
     TransferState state;
     FileMetadata metadata = {0};
@@ -48,8 +50,9 @@ int receive_loop(int client_fd) {
      * Initialize destination directory.
      */
     if (file_receiver_init(&file_receiver) < 0) {
-
-        fprintf(stderr, "Failed to initialize file receiver.\n");
+        fprintf(stderr,
+                "[Client %d] Failed to initialize file receiver.\n",
+                slot_id);
         return -1;
     }
 
@@ -66,13 +69,16 @@ int receive_loop(int client_fd) {
 
         if (result == 0) {
 
-            printf("Client disconnected unexpectedly.\n");
+            printf("[Client %d] Client disconnected.\n", slot_id);
+
             goto cleanup;
         }
 
         if (result < 0) {
 
-            fprintf(stderr, "Packet reception failed.\n");
+            fprintf(stderr,
+                    "[Client %d] Packet reception failed.\n",
+                    slot_id);
 
             status = -1;
             goto cleanup;
@@ -83,14 +89,14 @@ int receive_loop(int client_fd) {
          */
         switch (packet.header.type) {
 
-
             /* -------------------------------- */
             /* TRANSFER START                   */
             /* -------------------------------- */
 
             case MSG_TRANSFER_START: {
 
-                printf("\nReceived TRANSFER_START.\n");
+                printf("\n[Client %d] Received TRANSFER_START.\n",
+                       slot_id);
 
                 /*
                  * Validate transfer ID and sequence.
@@ -99,7 +105,8 @@ int receive_loop(int client_fd) {
                     packet.header.transfer_id == 0) {
 
                     fprintf(stderr,
-                            "Invalid TRANSFER_START header.\n");
+                            "[Client %d] Invalid TRANSFER_START header.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -116,7 +123,40 @@ int receive_loop(int client_fd) {
                     ) < 0) {
 
                     fprintf(stderr,
-                            "Invalid TRANSFER_START metadata.\n");
+                            "[Client %d] Invalid TRANSFER_START metadata.\n",
+                            slot_id);
+
+                    free_packet(&packet);
+                    status = -1;
+                    goto cleanup;
+                }
+
+                /*
+                 * Atomically reserve the connection for this transfer.
+                 *
+                 * This operation checks the shutdown state and changes
+                 * the client activity to CLIENT_TRANSFERRING under
+                 * the connection manager mutex.
+                 */
+                int reservation =
+                    connection_manager_try_start_transfer(slot_id);
+
+                if (reservation == 1) {
+
+                    printf("[Client %d] Transfer rejected: "
+                           "server is shutting down.\n",
+                           slot_id);
+
+                    free_packet(&packet);
+                    goto cleanup;
+                }
+
+                if (reservation < 0) {
+
+                    fprintf(stderr,
+                            "[Client %d] Failed to reserve connection "
+                            "for transfer.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -132,7 +172,8 @@ int receive_loop(int client_fd) {
                     ) < 0) {
 
                     fprintf(stderr,
-                            "Failed to initialize transfer state.\n");
+                            "[Client %d] Failed to initialize transfer state.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -144,24 +185,29 @@ int receive_loop(int client_fd) {
                  */
                 if (file_receiver_begin(
                         &file_receiver,
-                        &metadata
+                        &metadata,
+                        packet.header.transfer_id
                     ) < 0) {
 
                     fprintf(stderr,
-                            "Failed to create destination file.\n");
+                            "[Client %d] Failed to create destination file.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
                     goto cleanup;
                 }
 
-                printf("Transfer ID: %llu\n",
+                printf("[Client %d] Transfer ID: %llu\n",
+                       slot_id,
                        (unsigned long long)state.transfer_id);
 
-                printf("Filename: %s\n",
+                printf("[Client %d] Filename: %s\n",
+                       slot_id,
                        metadata.filename);
 
-                printf("Expected size: %llu bytes\n",
+                printf("[Client %d] Expected size: %llu bytes\n",
+                       slot_id,
                        (unsigned long long)metadata.file_size);
 
                 /*
@@ -174,7 +220,8 @@ int receive_loop(int client_fd) {
                     ) < 0) {
 
                     fprintf(stderr,
-                            "Failed to acknowledge START.\n");
+                            "[Client %d] Failed to acknowledge START.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -209,7 +256,8 @@ int receive_loop(int client_fd) {
                     packet.header.payload_length == 0) {
 
                     fprintf(stderr,
-                            "Invalid DATA packet or sequence.\n");
+                            "[Client %d] Invalid DATA packet or sequence.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -226,7 +274,8 @@ int receive_loop(int client_fd) {
                     ) < 0) {
 
                     fprintf(stderr,
-                            "Failed to write DATA chunk.\n");
+                            "[Client %d] Failed to write DATA chunk.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -234,8 +283,9 @@ int receive_loop(int client_fd) {
                 }
 
                 printf(
-                    "Received chunk: seq=%u, size=%u, "
+                    "[Client %d] Received chunk: seq=%u, size=%u, "
                     "total=%llu/%llu bytes\n",
+                    slot_id,
                     packet.header.sequence_number,
                     packet.header.payload_length,
                     (unsigned long long)file_receiver.received_size,
@@ -251,7 +301,9 @@ int receive_loop(int client_fd) {
                         packet.header.sequence_number
                     ) < 0) {
 
-                    fprintf(stderr, "Failed to send DATA ACK.\n");
+                    fprintf(stderr,
+                            "[Client %d] Failed to send DATA ACK.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -287,14 +339,16 @@ int receive_loop(int client_fd) {
                     ) < 0) {
 
                     fprintf(stderr,
-                            "Invalid TRANSFER_END packet.\n");
+                            "[Client %d] Invalid TRANSFER_END packet.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
                     goto cleanup;
                 }
 
-                printf("\nReceived TRANSFER_END.\n");
+                printf("\n[Client %d] Received TRANSFER_END.\n",
+                       slot_id);
 
                 /*
                  * Verify file size and SHA-256.
@@ -306,7 +360,8 @@ int receive_loop(int client_fd) {
                     ) < 0) {
 
                     fprintf(stderr,
-                            "File integrity verification failed.\n");
+                            "[Client %d] File integrity verification failed.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -316,7 +371,8 @@ int receive_loop(int client_fd) {
                 /*
                  * File is now complete and verified.
                  */
-                printf("Transfer completed successfully.\n");
+                printf("[Client %d] Transfer completed successfully.\n",
+                       slot_id);
 
                 /*
                  * Acknowledge END only after successful verification.
@@ -328,7 +384,8 @@ int receive_loop(int client_fd) {
                     ) < 0) {
 
                     fprintf(stderr,
-                            "Failed to acknowledge TRANSFER_END.\n");
+                            "[Client %d] Failed to acknowledge TRANSFER_END.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -347,6 +404,37 @@ int receive_loop(int client_fd) {
 
                 memset(&metadata, 0, sizeof(metadata));
 
+                /*
+                 * Transfer completed. Mark client as idle.
+                 */
+                if (connection_manager_set_activity(
+                        slot_id,
+                        CLIENT_IDLE
+                    ) < 0) {
+
+                    fprintf(stderr,
+                            "[Client %d] Failed to update client activity.\n",
+                            slot_id);
+
+                    free_packet(&packet);
+                    status = -1;
+                    goto cleanup;
+                }
+
+                /*
+                 * During server shutdown, do not wait for
+                 * another transfer from this client.
+                 */
+                if (connection_manager_is_shutting_down()) {
+
+                    printf("[Client %d] Closing connection "
+                           "after completed transfer (shutdown).\n",
+                           slot_id);
+
+                    free_packet(&packet);
+                    goto cleanup;
+                }
+
                 break;
             }
 
@@ -357,7 +445,8 @@ int receive_loop(int client_fd) {
 
             case MSG_DISCONNECT: {
 
-                printf("\nClient requested disconnection.\n");
+                printf("\n[Client %d] Client requested disconnection.\n",
+                       slot_id);
 
                 /*
                  * DISCONNECT is connection-level.
@@ -367,7 +456,8 @@ int receive_loop(int client_fd) {
                     packet.header.sequence_number != 0) {
 
                     fprintf(stderr,
-                            "Invalid DISCONNECT packet.\n");
+                            "[Client %d] Invalid DISCONNECT packet.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
@@ -388,14 +478,16 @@ int receive_loop(int client_fd) {
                 if (send_ack(client_fd, 0, 0) < 0) {
 
                     fprintf(stderr,
-                            "Failed to acknowledge disconnection.\n");
+                            "[Client %d] Failed to acknowledge disconnection.\n",
+                            slot_id);
 
                     free_packet(&packet);
                     status = -1;
                     goto cleanup;
                 }
 
-                printf("Disconnect request acknowledged.\n");
+                printf("[Client %d] Disconnect request acknowledged.\n",
+                       slot_id);
 
                 free_packet(&packet);
                 goto cleanup;
@@ -409,7 +501,8 @@ int receive_loop(int client_fd) {
             default: {
 
                 fprintf(stderr,
-                        "Unexpected message type: 0x%04X\n",
+                        "[Client %d] Unexpected message type: 0x%04X\n",
+                        slot_id,
                         packet.header.type);
 
                 free_packet(&packet);
@@ -436,6 +529,8 @@ cleanup:
     abort_transfer(&state);
 
     file_receiver_destroy(&file_receiver);
+
+    printf("[Client %d] Receiver cleanup completed.\n", slot_id);
 
     return status;
 }
