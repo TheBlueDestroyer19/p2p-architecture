@@ -10,6 +10,9 @@
 #define RECEIVED_DIRECTORY "p2p_recieved"
 #define SHA256_DIGEST_SIZE 32
 
+/* Original filename + '_' + 16 hexadecimal transaction ID characters. */
+#define STORED_FILENAME_MAX_LENGTH (MAX_FILENAME_LENGTH + 17)
+
 typedef struct {
     int directory_fd;
     int file_fd;
@@ -17,7 +20,7 @@ typedef struct {
     uint64_t expected_size;
     uint64_t received_size;
 
-    char filename[MAX_FILENAME_LENGTH + 1];
+    char filename[STORED_FILENAME_MAX_LENGTH + 1];
 
     EVP_MD_CTX *hash_ctx;
 
@@ -27,10 +30,11 @@ typedef struct {
 /* Initialize the receiving directory. */
 int file_receiver_init(FileReceiver *receiver);
 
-/* Create a destination file using received metadata. */
+/* Create a destination file using metadata and transaction ID. */
 int file_receiver_begin(
     FileReceiver *receiver,
-    const FileMetadata *metadata
+    const FileMetadata *metadata,
+    uint64_t transfer_id
 );
 
 /* Write one received DATA chunk and update SHA-256. */

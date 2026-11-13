@@ -1,332 +1,205 @@
 # P2P File Transfer System
 
-A lightweight peer-to-peer file transfer system implemented in C using POSIX TCP sockets. The project focuses on understanding network programming, application-layer protocol design, reliable data transfer, binary file handling, and data integrity verification.
+**Version:** `v1.1.0`  
+**Language:** C  
+**Protocol:** TCP/IP  
+**Platform:** Linux
 
-The client and server are maintained as **two independent codebases**. They communicate using a common application protocol implemented separately on both sides.
+A C-based file transfer system built using TCP sockets and a custom application-layer protocol. The project focuses on reliable file transmission, data integrity, concurrent client handling, and safe resource management.
 
-## Features
+Version 1.1.0 introduces a **thread-per-client server architecture**, allowing multiple clients to transfer files concurrently while maintaining independent transfer states.
 
-- TCP-based client-server communication.
-- Custom application-layer binary protocol.
-- Length-prefixed packet framing.
-- Structured file metadata exchange.
-- Transfer identification using unique 64-bit IDs.
-- Sequence-number-based packet ordering and validation.
-- Stop-and-wait acknowledgement mechanism.
-- Binary file transfer with support for large files.
-- SHA-256 integrity verification using OpenSSL.
-- Safe filename handling and protection against accidental overwrites.
-- Graceful connection termination and server shutdown.
-- Sequential handling of multiple client connections.
+---
 
-## Architecture
+## 1. Features
 
-The system follows a layered design:
+### Core functionality
+- TCP-based client-server communication using POSIX sockets.
+- Custom binary application-layer protocol.
+- Length-prefixed packet format for reliable message framing over TCP.
+- Handling of partial socket reads and writes.
+- Support for file transfers using fixed-size data chunks.
+- SHA-256-based file integrity verification using OpenSSL.
+- Unique transfer identifiers for individual file transfers.
+- Transaction-based naming of received files to avoid filename collisions.
+- Safe file creation and cleanup.
+
+### Concurrent server (v1.1.0)
+- Thread-per-client architecture.
+- Supports up to **5 simultaneously connected clients**.
+- Each client is handled by an independent worker thread.
+- Multiple clients can transfer files concurrently.
+- Independent transfer state for every client.
+- Main server thread manages connection slots and worker lifecycle.
+- Completed workers are joined before their connection slots are reused.
+
+### Graceful shutdown
+- Handles `SIGINT` for controlled server shutdown.
+- Stops admitting new clients once shutdown begins.
+- Immediately disconnects idle clients.
+- Allows active transfers to finish within a 60-second grace period.
+- Forcefully terminates remaining connections after the grace period.
+- Cleans up incomplete transfers and worker resources.
+
+---
+
+## 2. Architecture
+
+The project is organized into two independent codebases: the client and the server.
 
 ```text
-                  CLIENT
-                    |
-          +---------------------+
-          |    Sender Module   |
-          +---------------------+
-                    |
-          +---------------------+
-          |   Transfer Module  |
-          +---------------------+
-                    |
-          +---------------------+
-          |     Packet Layer   |
-          +---------------------+
-                    |
-          +---------------------+
-          |    Network Layer   |
-          +---------------------+
-                    |
-             TCP Connection
-                    |
-          +---------------------+
-          |    Network Layer   |
-          +---------------------+
-                    |
-          +---------------------+
-          |     Packet Layer   |
-          +---------------------+
-                    |
-          +---------------------+
-          |   Transfer Module  |
-          +---------------------+
-                    |
-          +---------------------+
-          |  File Receiver     |
-          +---------------------+
-                    |
-               SERVER
+p2p/
+├── client/
+│   ├── include/
+│   ├── src/
+│   └── ...
+│
+├── server/
+│   ├── include/
+│   ├── src/
+│   └── ...
+│
+├── README.md
+└── USER.md
 ```
 
-### Client
+The client and server maintain separate source files, headers, and build configurations.
 
-The client is responsible for:
+### Server architecture
 
-1. Establishing a TCP connection with the server.
-2. Accepting a local file path from the user.
-3. Extracting the filename and determining the file size.
-4. Generating a unique transfer ID.
-5. Sending file metadata.
-6. Reading the file in chunks and transmitting them.
-7. Waiting for acknowledgements before proceeding.
-8. Computing the SHA-256 digest of the transmitted content.
-9. Sending the final digest and waiting for transfer confirmation.
+The server uses a thread-per-client model.
 
-### Server
+```text
+                  ┌──────────────────┐
+                  │   Main Server    │
+                  │      Thread      │
+                  └────────┬─────────┘
+                           │
+                     Accept Clients
+                           │
+                  ┌────────▼─────────┐
+                  │ Connection Table │
+                  │   Max: 5 Clients │
+                  └────────┬─────────┘
+                           │
+             ┌─────────────┼─────────────┐
+             │             │             │
+        ┌────▼────┐   ┌────▼────┐   ┌────▼────┐
+        │ Worker 1│   │ Worker 2│   │ Worker 3│
+        └────┬────┘   └────┬────┘   └────┬────┘
+             │             │             │
+        Client 1      Client 2      Client 3
+```
 
-The server is responsible for:
+**Main server thread responsibilities:**
+- Initialize the listening socket.
+- Accept incoming connections.
+- Allocate available connection slots.
+- Create worker threads for accepted clients.
+- Monitor worker completion notifications.
+- Join completed workers and reclaim their slots.
+- Coordinate server shutdown.
 
-1. Listening for incoming TCP connections.
-2. Accepting a client connection.
-3. Validating incoming packets and transfer state.
-4. Extracting and validating file metadata.
-5. Creating the destination file safely.
-6. Writing received binary chunks to disk.
-7. Computing an independent SHA-256 digest.
-8. Verifying the final file size and digest.
-9. Acknowledging successful transfers.
-10. Cleaning up incomplete transfers and closing connections.
+**Worker thread responsibilities:**
+- Handle the entire lifetime of one client connection.
+- Process multiple sequential file transfers.
+- Maintain independent transfer state and file receiver resources.
+- Verify received file data.
+- Close its client socket when finished.
+- Notify the main thread when its execution completes.
 
-## Application-Layer Protocol
+Each worker owns its transfer state, preventing concurrent clients from interfering with one another.
+
+### Connection management
+
+A fixed-size connection table tracks the lifecycle of each client.
+
+Each slot transitions through three states:
+
+| State | Description |
+|---|---|
+| `SLOT_FREE` | Available for a new connection |
+| `SLOT_RUNNING` | Worker is handling a client |
+| `SLOT_FINISHED` | Worker has completed and awaits reclamation |
+
+A mutex protects shared connection-table state.
+
+A non-blocking notification pipe wakes the main server thread when a worker finishes. The main thread then joins the worker and releases its slot.
+
+This ensures that a connection slot is never reused before its previous worker has been joined.
+
+---
+
+## 3. Communication Protocol
 
 TCP provides a reliable, ordered byte stream, but it does not preserve application-level message boundaries.
 
-To address this, the project implements a custom **length-prefixed packet protocol**.
+To address this, the project implements a custom length-prefixed packet protocol.
 
-Every packet consists of:
+### Packet structure
 
-```text
-+---------------------------+
-|       Packet Header       |  19 bytes
-+---------------------------+
-|                           |
-|       Payload             |  Variable length
-|                           |
-+---------------------------+
-```
-
-### Packet Header
-
-The header has a fixed size of 19 bytes.
+Every packet contains a fixed-size 19-byte header.
 
 | Field | Size | Description |
 |---|---:|---|
 | Version | 1 byte | Protocol version |
-| Message Type | 2 bytes | Identifies the packet type |
-| Transfer ID | 8 bytes | Identifies the active transfer |
+| Message Type | 2 bytes | Identifies packet purpose |
+| Transfer ID | 8 bytes | Identifies a file transfer |
 | Sequence Number | 4 bytes | Identifies packet order |
-| Payload Length | 4 bytes | Number of payload bytes |
+| Payload Length | 4 bytes | Size of the payload |
 
-All multibyte integer fields are encoded in **big-endian byte order**.
+All multi-byte header fields use big-endian byte order.
 
-The header is serialized and deserialized manually. Raw C structures are never transmitted over the network, avoiding problems caused by compiler padding, alignment, and host byte order.
+The payload follows the header and can contain metadata, file data, acknowledgements, or integrity information.
 
-Maximum payload size: **65,536 bytes**.
-
-### Message Types
+### Message types
 
 | Message | Value | Purpose |
 |---|---:|---|
-| `MSG_DATA` | `0x0001` | Carries a file data chunk |
+| `MSG_DATA` | `0x0001` | Carries file data |
 | `MSG_ACK` | `0x0002` | Acknowledges a packet |
-| `MSG_ERROR` | `0x0003` | Represents an error |
+| `MSG_ERROR` | `0x0003` | Represents a transfer error |
 | `MSG_TRANSFER_START` | `0x0004` | Initiates a file transfer |
-| `MSG_TRANSFER_END` | `0x0005` | Marks the end of a transfer |
-| `MSG_DISCONNECT` | `0x0006` | Terminates the connection |
+| `MSG_TRANSFER_END` | `0x0005` | Signals completion of a transfer |
+| `MSG_DISCONNECT` | `0x0006` | Requests connection termination |
 
-## Data Structures
-
-The following structures represent the principal data exchanged and maintained by the system.
-
-### 1. PacketHeader
-
-Represents the fixed-size header of every protocol packet.
-
-```c
-typedef struct {
-    uint8_t version;
-    uint16_t type;
-    uint64_t transfer_id;
-    uint32_t sequence_number;
-    uint32_t payload_length;
-} PacketHeader;
-```
-
-### 2. Packet
-
-Combines a packet header with its dynamically allocated payload.
-
-```c
-typedef struct {
-    PacketHeader header;
-    uint8_t *payload;
-} Packet;
-```
-
-The payload is dynamically allocated when receiving a packet and released using `free_packet()`.
-
-### 3. FileMetadata
-
-Contains the information required to initiate a file transfer.
-
-```c
-#define MAX_FILENAME_LENGTH 255
-#define METADATA_FIXED_SIZE 10
-
-typedef struct {
-    char filename[MAX_FILENAME_LENGTH + 1];
-    uint64_t file_size;
-} FileMetadata;
-```
-
-Metadata is transmitted as the payload of `MSG_TRANSFER_START`.
-
-#### Metadata wire format
-
-The metadata is serialized into a variable-length byte sequence:
-
-| Field | Size | Description |
-|---|---:|---|
-| Filename Length | 2 bytes | Length of filename in bytes |
-| File Size | 8 bytes | Original file size |
-| Filename | Variable | Filename encoded as UTF-8 |
-
-The total metadata payload length is:
-
-\[
-10 + \text{filename length}
-\]
-
-For example, a file named `report.pdf` with a size of 4096 bytes produces the following logical metadata:
-
-```text
-Filename Length : 10
-File Size       : 4096
-Filename        : report.pdf
-```
-
-The filename is transmitted as a basename, not as an absolute local path.
-
-The receiver validates the filename and rejects empty names, path separators, special directory names, and control characters.
-
-### 4. TransferState
-
-Maintains the state of an ongoing transfer.
-
-```c
-typedef enum {
-    TRANSFER_IDLE,
-    TRANSFER_ACTIVE
-} TransferStatus;
-
-typedef struct {
-    TransferStatus status;
-    uint64_t transfer_id;
-    uint32_t next_sequence_number;
-} TransferState;
-```
-
-The transfer state ensures that packets belong to the correct transfer and arrive in the expected order.
-
-### 5. FileReceiver (Server)
-
-Maintains the state required to receive and verify a file.
-
-```c
-typedef struct {
-    int directory_fd;
-    int file_fd;
-    uint64_t expected_size;
-    uint64_t received_size;
-    char filename[MAX_FILENAME_LENGTH + 1];
-    EVP_MD_CTX *hash_ctx;
-    int active;
-} FileReceiver;
-```
-
-The server uses this structure to manage file creation, disk writes, received byte counts, and incremental SHA-256 computation.
-
-## Transfer Lifecycle
+### Transfer sequence
 
 A file transfer follows this sequence:
 
-```text
-CLIENT                                  SERVER
-  |                                       |
-  |------ TRANSFER_START (seq = 0) ------>|
-  |<------------- ACK (seq = 0) ----------|
-  |                                       |
-  |--------- DATA (seq = 1) ------------->|
-  |<------------- ACK (seq = 1) ----------|
-  |                                       |
-  |--------- DATA (seq = 2) ------------->|
-  |<------------- ACK (seq = 2) ----------|
-  |                                       |
-  |                 ...                   |
-  |                                       |
-  |--------- TRANSFER_END --------------->|
-  |        (SHA-256 digest)                |
-  |<------------- ACK --------------------|
-  |                                       |
-  |            Transfer Complete          |
-  |                                       |
-```
+1. Client generates a unique 64-bit transfer ID.
+2. Client sends `MSG_TRANSFER_START` containing file metadata.
+3. Server validates the metadata and initializes the receiver.
+4. Server acknowledges the transfer start.
+5. Client sends file data in chunks.
+6. Server writes received chunks and acknowledges successful processing.
+7. Client sends `MSG_TRANSFER_END` containing the SHA-256 digest.
+8. Server verifies the expected file size and digest.
+9. Server synchronizes and closes the received file.
+10. Server acknowledges successful completion.
 
-### Sequence Number Convention
+The protocol uses **stop-and-wait acknowledgement**: the sender waits for an ACK before sending the next packet.
 
-A single sequence-number space is maintained throughout a transfer.
+Sequence numbers begin at zero for each transfer, with the transfer-start packet using sequence number zero.
 
-| Packet | Sequence Number |
-|---|---:|
-| `TRANSFER_START` | 0 |
-| First `DATA` | 1 |
-| Second `DATA` | 2 |
-| Subsequent `DATA` | Incremented |
-| `TRANSFER_END` | Next expected sequence |
+---
 
-An ACK echoes the transfer ID and sequence number of the packet being acknowledged.
+## 4. File Integrity and Storage
 
-The sender advances its sequence number only after receiving a valid ACK.
+### SHA-256 verification
 
-### Stop-and-Wait Mechanism
+The project uses OpenSSL's EVP interface to calculate SHA-256 hashes.
 
-The implementation uses a stop-and-wait transmission strategy.
+- Client calculates the digest while reading the source file.
+- Server independently calculates the digest while receiving and writing data.
+- Client sends the final 32-byte digest in the transfer-end packet.
+- Server compares both digests before acknowledging successful completion.
 
-For every packet:
+This verifies that the received file matches the transmitted data.
 
-1. The sender transmits the packet.
-2. The sender waits for an acknowledgement.
-3. The receiver validates and processes the packet.
-4. The receiver sends an ACK only after successful processing.
-5. The sender proceeds to the next packet.
+**Note:** SHA-256 provides integrity verification, not authentication or protection against malicious modification of the communication.
 
-This simplifies synchronization and packet-order validation, although it limits throughput on high-latency networks.
-
-## File Integrity Verification
-
-The project uses **SHA-256** through OpenSSL's EVP interface.
-
-Both sides independently compute the digest:
-
-- The client updates its hash as file chunks are transmitted.
-- The server updates its hash as chunks are successfully written to disk.
-- At the end of the transfer, the client sends its 32-byte digest in `MSG_TRANSFER_END`.
-- The server finalizes its digest and compares it with the received digest.
-
-The server acknowledges the final packet only if:
-
-1. The received file size matches the expected size.
-2. The computed SHA-256 digest matches the supplied digest.
-3. File synchronization and closing succeed.
-
-This detects accidental corruption or inconsistencies during transfer. SHA-256 verification alone does not authenticate the sender or protect against an active attacker who can modify both the file and its digest.
-
-## File Storage and Safety
+### File storage
 
 Received files are stored in:
 
@@ -334,38 +207,181 @@ Received files are stored in:
 p2p_recieved/
 ```
 
-The receiver uses directory-relative file operations and flags such as:
+The server generates a unique stored filename by appending the transfer ID before the final file extension.
 
-- `O_EXCL` to prevent overwriting existing files.
-- `O_NOFOLLOW` to prevent following symbolic links.
-- `openat()` to anchor file creation to the destination directory.
+Examples:
 
-If a transfer fails or is interrupted before completion, the incomplete destination file is removed.
+```text
+report.pdf
+    → report_00000000a1b2c3d4.pdf
 
-## Current Limitations
+archive.tar.gz
+    → archive.tar_00000000a1b2c3d4.gz
 
-Version 1.0.0 intentionally focuses on a reliable basic transfer implementation.
+README
+    → README_00000000a1b2c3d4
 
-- One active client is handled at a time.
-- Multiple clients may wait in the TCP listen backlog.
-- Transfers use stop-and-wait rather than a sliding window.
-- Interrupted transfers cannot be resumed.
-- TLS encryption and client authentication are not implemented.
-- NAT traversal and automatic peer discovery are not implemented.
+.env
+    → .env_00000000a1b2c3d4
+```
 
-## Technology Stack
+The original filename is retained in the transfer metadata.
 
-- **Language:** C
-- **Networking:** POSIX TCP sockets
-- **Synchronization:** TCP reliability and application-level acknowledgements
-- **Integrity:** OpenSSL SHA-256 EVP API
-- **Build:** GCC
-- **Platform:** Linux / POSIX-compatible environments
+The server uses safe file-creation operations, including `openat()` with `O_EXCL` and `O_NOFOLLOW`, to prevent accidental overwrites and avoid following symbolic links.
 
-## Version
+Incomplete files are removed when a transfer fails or the connection terminates unexpectedly.
 
-**Current Release: v1.0.0**
+---
 
-The initial release provides end-to-end binary file transfer with metadata exchange, sequence validation, acknowledgements, and SHA-256 integrity verification.
+## 5. Graceful Server Shutdown
 
-See [USER.md](USER.md) for installation, configuration, and usage instructions.
+The server supports controlled shutdown through `SIGINT` (`Ctrl+C`).
+
+The shutdown procedure is designed to avoid abruptly interrupting active transfers whenever possible.
+
+### Shutdown sequence
+
+1. Server receives the shutdown signal.
+2. Main thread stops admitting new clients.
+3. Idle client connections are shut down immediately.
+4. Active transfers are allowed to complete.
+5. Workers exit after completing their current transfers.
+6. The server waits for workers to finish and joins them.
+7. If the 60-second grace period expires, remaining client sockets are shut down.
+8. Incomplete transfers are cleaned up.
+9. Server releases its resources and terminates.
+
+New transfers are rejected once shutdown begins, even if a client already has an established connection.
+
+The shutdown deadline is measured using a monotonic clock to avoid issues caused by changes to system time.
+
+---
+
+## 6. Building the Project
+
+### Prerequisites
+
+- Linux environment
+- GCC compiler
+- POSIX threads
+- OpenSSL development libraries
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install build-essential libssl-dev
+```
+
+### Build the client
+
+```bash
+cd client
+gcc -Wall -Wextra -Wpedantic -Iinclude src/*.c -o client -lcrypto
+```
+
+### Build the server
+
+```bash
+cd server
+gcc -Wall -Wextra -Wpedantic -pthread -Iinclude src/*.c -o server -lcrypto
+```
+
+---
+
+## 7. Running the Project
+
+Start the server first:
+
+```bash
+cd server
+./server
+```
+
+Then, from another terminal:
+
+```bash
+cd client
+./client
+```
+
+The current local testing configuration uses:
+
+```c
+#define SERVER_IP   "127.0.0.1"
+#define SERVER_PORT 8080
+```
+
+For testing across different machines, configure the server to bind to an appropriate network interface and configure the client to connect to the server's reachable IP address.
+
+---
+
+## 8. Testing
+
+The implementation has been tested across the following scenarios:
+
+- Single-client file transfer.
+- Multiple simultaneous client connections.
+- Concurrent file transfers.
+- Maximum client limit enforcement.
+- Connection-slot reuse after client disconnection.
+- Multiple transfers over the same connection.
+- Transfers involving identical original filenames.
+- Client disconnection during an active transfer.
+- Graceful shutdown with idle clients.
+- Graceful shutdown during active transfers.
+- Mixed idle and transferring clients during shutdown.
+- Forced shutdown after the grace period.
+- Cleanup of incomplete files.
+
+File size and SHA-256 digest verification are used to validate successful transfers.
+
+---
+
+## 9. Version History
+
+### v1.1.0 — Concurrent Multi-Client Server
+
+- Introduced thread-per-client server architecture.
+- Added support for up to five simultaneous client connections.
+- Implemented connection-slot lifecycle management.
+- Added worker completion notification using a non-blocking pipe.
+- Added mutex-based synchronization for shared connection state.
+- Implemented graceful shutdown with a 60-second transfer completion window.
+- Added rejection of new transfers during shutdown.
+- Introduced transaction-ID-based stored filenames.
+- Improved cleanup of incomplete transfers and worker resources.
+
+### v1.0.0 — Initial Stable Release
+
+- Implemented TCP client-server file transfer.
+- Introduced custom binary packet protocol.
+- Added packet serialization and deserialization.
+- Implemented partial send/receive handling.
+- Added transfer IDs and sequence numbers.
+- Implemented stop-and-wait acknowledgements.
+- Added SHA-256 file integrity verification.
+- Implemented safe file storage and incomplete-transfer cleanup.
+- Supported sequential client connections.
+
+---
+
+## 10. Future Roadmap
+
+Potential directions for future development:
+
+| Version | Planned Enhancement |
+|---|---|
+| `v1.2.0` | Sliding-window protocol and pipelined transfers |
+| `v1.3.0` | Interrupted transfer resumption |
+| `v1.4.0` | TLS encryption and client authentication |
+| `v2.0.0` | Peer discovery, direct peer-to-peer communication, and NAT traversal |
+
+These are proposed future enhancements, not features currently implemented.
+
+---
+
+## License
+
+Specify the project's license here.
+
