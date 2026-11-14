@@ -1,258 +1,385 @@
-# User Guide — P2P File Transfer System
+# USER GUIDE — P2P File Transfer System
 
-This document explains how to build, configure, and use the P2P File Transfer System.
+## 1. Project Overview
 
-The project consists of two independent repositories:
+This repository contains two independent codebases:
 
-- **Client repository:** Establishes connections and sends files.
-- **Server repository:** Listens for connections and receives files.
+- `client/` — TCP file-transfer client.
+- `server/` — TCP file-transfer server.
 
-Both repositories must be cloned and built independently.
+Both have independent source files, header files, build configurations and executables. They communicate over TCP.
 
-## 1. Prerequisites
+The project uses:
+- C (GNU C11)
+- GCC
+- POSIX sockets
+- POSIX threads (server)
+- OpenSSL (SHA-256)
+
+---
+
+## 2. Repository Structure
+
+```text
+p2p/
+├── client/
+│   ├── include/
+│   ├── src/
+│   │   ├── app/
+│   │   ├── network/
+│   │   ├── protocol/
+│   │   ├── reliability/
+│   │   └── transfer/
+│   ├── build/
+│   ├── Makefile
+│   └── .gitignore
+│
+├── server/
+│   ├── include/
+│   ├── src/
+│   │   ├── app/
+│   │   ├── network/
+│   │   ├── protocol/
+│   │   ├── reliability/
+│   │   ├── runtime/
+│   │   ├── storage/
+│   │   └── transfer/
+│   ├── build/
+│   ├── Makefile
+│   └── .gitignore
+│
+├── README.md
+├── USER.md
+└── LICENSE
+```
+
+All public header files are maintained directly inside their respective `include/` directories.
+
+All generated object files and executables are stored inside `build/`.
+
+---
+
+## 3. Prerequisites
 
 The following tools and libraries are required:
 
-| Requirement | Purpose |
-|---|---|
-| GCC | Compiling C source files |
-| POSIX-compatible OS | Socket and file APIs |
-| OpenSSL development library | SHA-256 implementation |
-| Git | Cloning the repositories |
+- GCC compiler
+- GNU Make
+- OpenSSL development libraries
+- POSIX threads support
+- Linux environment
 
 ### Ubuntu / Debian
 
-Install the required dependencies:
+Install the dependencies:
 
 ```bash
 sudo apt update
-sudo apt install build-essential libssl-dev git
+sudo apt install build-essential libssl-dev
 ```
 
-Verify GCC:
+Verify the installations:
 
 ```bash
 gcc --version
+make --version
 ```
 
-## 2. Clone the Repositories
+---
 
-Clone the client and server repositories separately:
+## 4. Building and Running Using Makefiles (Recommended)
+
+Both the client and server have independent Makefiles.
+
+The Makefiles automatically:
+- Locate their respective project directories.
+- Discover all `.c` source files recursively under `src/`.
+- Compile source files separately.
+- Generate dependency files for header tracking.
+- Place object files inside `build/obj/`.
+- Generate the final executable inside `build/`.
+
+### 4.1 Running the Client
+
+Navigate to the client directory:
 
 ```bash
-git clone https://github.com/TheBlueDestroyer19/p2p-architecture
+cd client
 ```
 
-Enter the appropriate repository when building or running either component.
+Build and run:
 
-## 3. Configuration
-
-### Server Configuration
-
-Open the server configuration header and configure the listening address and port.
-
-```c
-#define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 8080
-#define SERVER_BACKLOG 5
+```bash
+make run
 ```
 
-- `SERVER_IP`: Address on which the server listens.
-- `SERVER_PORT`: TCP port used by the application.
-- `SERVER_BACKLOG`: Maximum number of pending connection requests in the listen queue.
-
-For testing on the same machine, `127.0.0.1` is sufficient.
-
-For communication across different machines, configure the server to listen on an appropriate network interface. Ensure that the firewall permits incoming TCP connections on the selected port.
-
-### Client Configuration
-
-Configure the client with the server's IP address and port.
-
-For local testing:
+The executable is generated at:
 
 ```text
-IP Address : 127.0.0.1
-Port       : 8080
+client/build/client
 ```
 
-For remote communication, use the server machine's reachable IP address.
+### 4.2 Running the Server
 
-## 4. Build Instructions
-
-### Build the Server
-
-From the server repository root:
+Navigate to the server directory:
 
 ```bash
-gcc -Wall -Wextra -Wpedantic -Iinclude src/*.c -o server -lcrypto
+cd server
 ```
 
-### Build the Client
-
-From the client repository root:
+Build and run:
 
 ```bash
-gcc -Wall -Wextra -Wpedantic -Iinclude src/*.c -o client -lcrypto
+make run
 ```
 
-The `-lcrypto` flag links the OpenSSL cryptographic library.
-
-If compilation succeeds, the executable will be generated in the repository root.
-
-## 5. Running the Application
-
-### Step 1: Start the Server
-
-From the server repository:
-
-```bash
-./server
-```
-
-The server starts listening for incoming connections.
-
-### Step 2: Start the Client
-
-From the client repository:
-
-```bash
-./client
-```
-
-The client attempts to establish a TCP connection with the configured server.
-
-Once connected, it prompts for a file path.
-
-### Step 3: Send a File
-
-Enter the path of the file you want to transfer.
-
-Example:
+The executable is generated at:
 
 ```text
-Enter file path: /home/user/Documents/report.pdf
+server/build/server
 ```
 
-The client then:
+### 4.3 Running from the Repository Root
 
-1. Reads the file metadata.
-2. Initiates a transfer.
-3. Sends the file in chunks.
-4. Waits for acknowledgements.
-5. Computes the SHA-256 digest.
-6. Sends the final digest for verification.
+The Makefiles are independent, so they can also be invoked from the repository root using:
 
-The server receives and stores the file in:
-
-```text
-p2p_recieved/
+```bash
+make -C client run
 ```
 
-The original filename is retained.
+For the server:
 
-**Note:** The server does not overwrite an existing file with the same name. If the destination filename already exists, the transfer is rejected.
-
-### Step 4: Send More Files
-
-After a successful transfer, the client returns to the file path prompt.
-
-You can continue sending files over the same TCP connection.
-
-### Step 5: Disconnect
-
-Enter:
-
-```text
-/quit
+```bash
+make -C server run
 ```
 
-The client sends a disconnect message and waits for the server's acknowledgement before closing the connection.
+The `-C` option tells Make to execute using the specified directory.
 
-The server then returns to its listening loop and can accept another client.
+### 4.4 Available Make Commands
 
-## 6. Testing Locally
+The following commands are supported by both Makefiles:
 
-You can test the system using two terminals on the same machine.
+| Command | Description |
+|---|---|
+| `make` | Compile the application |
+| `make run` | Build if necessary and execute the application |
+| `make clean` | Remove the entire build directory |
+| `make rebuild` | Clean and perform a fresh build |
+
+For example:
+
+```bash
+cd server
+
+make clean
+make
+make run
+```
+
+---
+
+## 5. Building and Running Using Custom GCC Commands
+
+The applications can also be compiled manually without using Makefiles.
+
+These commands recursively discover all C source files under `src/`, including files inside nested directories.
+
+Run the commands from the respective client or server directory.
+
+### 5.1 Client
+
+Navigate to the client directory:
+
+```bash
+cd client
+```
+
+Create the build directory:
+
+```bash
+mkdir -p build
+```
+
+Compile:
+
+```bash
+gcc -std=gnu11 \
+    -Wall -Wextra -Wpedantic \
+    -Iinclude \
+    $(find src -type f -name '*.c') \
+    -o build/client \
+    -lcrypto
+```
+
+Run:
+
+```bash
+./build/client
+```
+
+### 5.2 Server
+
+Navigate to the server directory:
+
+```bash
+cd server
+```
+
+Create the build directory:
+
+```bash
+mkdir -p build
+```
+
+Compile:
+
+```bash
+gcc -std=gnu11 \
+    -Wall -Wextra -Wpedantic \
+    -pthread \
+    -Iinclude \
+    $(find src -type f -name '*.c') \
+    -o build/server \
+    -lcrypto \
+    -pthread
+```
+
+Run:
+
+```bash
+./build/server
+```
+
+### Compiler Flags Explained
+
+| Flag | Purpose |
+|---|---|
+| `-std=gnu11` | Uses GNU C11 |
+| `-Wall` | Enables common compiler warnings |
+| `-Wextra` | Enables additional warnings |
+| `-Wpedantic` | Reports non-standard language extensions |
+| `-Iinclude` | Adds the header directory to the include search path |
+| `-pthread` | Enables POSIX thread support |
+| `-lcrypto` | Links OpenSSL cryptographic functionality |
+
+**Note:** The manual commands compile all source files in one invocation. The Makefiles instead compile individual source files into object files and use dependency tracking for incremental builds.
+
+---
+
+## 6. Client-Server Execution
+
+The server must be running before connecting a client.
+
+For local testing, use two terminals.
 
 **Terminal 1 — Server**
 
 ```bash
 cd server
-./server
+make run
 ```
 
 **Terminal 2 — Client**
 
 ```bash
 cd client
-./client
+make run
 ```
 
-Make sure both components use the same IP address and port configuration.
+The current local configuration uses:
 
-## 7. Verifying File Integrity
+```c
+#define SERVER_IP   "127.0.0.1"
+#define SERVER_PORT 8080
+```
 
-After a successful transfer, compare the SHA-256 digests of the original and received files.
+For communication between different machines, configure the server to bind to an appropriate network interface and configure the client with the server's reachable IP address.
 
-On Linux:
+---
+
+## 7. Build Directory Management
+
+Each application maintains its own build directory.
+
+Example:
+
+```text
+server/
+└── build/
+    ├── server
+    └── obj/
+        ├── app/
+        ├── network/
+        ├── protocol/
+        ├── runtime/
+        ├── storage/
+        └── transfer/
+```
+
+The client follows the same structure, with its own application-specific modules.
+
+To remove generated binaries and object files:
 
 ```bash
-sha256sum /path/to/original/file
-sha256sum server/p2p_recieved/filename
+make clean
 ```
 
-Both SHA-256 values should be identical.
+To perform a fresh build:
 
-For example:
-
-```text
-a1b2c3...  original.pdf
-a1b2c3...  received.pdf
+```bash
+make rebuild
 ```
 
-The actual hash will depend on the file contents.
+The `build/` directory is excluded from Git through `.gitignore`.
 
-The server also performs this verification automatically before acknowledging the completion of a transfer.
+---
 
-## 8. Graceful Server Shutdown
+## 8. Development Guidelines
 
-Press:
+1. Keep client and server codebases independent.
+2. Place public header files directly inside the respective `include/` directory.
+3. Organize source files according to their functionality.
+4. Keep generated binaries and object files inside `build/`.
+5. Avoid committing generated build artifacts.
+6. Preserve compatibility between client and server protocol definitions.
+7. Test both applications after modifying shared protocol behaviour.
+8. Use the Makefiles for normal development and incremental builds.
+9. Use custom GCC commands when manual compilation is required.
 
-```text
-Ctrl + C
+---
+
+## 9. Git and Versioning
+
+The repository follows a versioned release workflow.
+
+- `main` contains the latest stable implementation.
+- Development branches are used for upcoming changes.
+- Annotated Git tags identify stable releases.
+
+Examples:
+
+```bash
+git branch
+git tag
 ```
 
-The server handles the interrupt signal, exits its main loop, closes active connections, and releases its resources.
+To inspect a particular release:
 
-## 9. Troubleshooting
+```bash
+git switch --detach v1.1.0
+```
 
-| Problem | Possible Cause | Suggested Action |
-|---|---|---|
-| Connection refused | Server is not running | Start the server first |
-| Connection timeout | Firewall or incorrect IP | Check network configuration |
-| Address already in use | Port is occupied | Stop the other process or choose another port |
-| File not found | Invalid client-side path | Check the file path |
-| Permission denied | Insufficient filesystem permissions | Check directory and file permissions |
-| Destination already exists | Server refuses to overwrite | Rename or remove the existing file |
-| SHA-256 mismatch | File contents differ | Retry the transfer and investigate the source |
-| Compilation failure | Missing development libraries | Install GCC and OpenSSL development packages |
+To return to the latest stable branch:
 
-## 10. Important Notes
+```bash
+git switch main
+```
 
-- The server and client must implement compatible protocol versions.
-- The application uses TCP and relies on its reliable, ordered byte stream.
-- The current implementation supports one active client at a time.
-- Multiple clients can connect sequentially, but simultaneous transfers are not supported.
-- The transfer mechanism uses stop-and-wait acknowledgements.
-- Incomplete transfers are discarded rather than resumed.
-- SHA-256 provides integrity verification, not encryption or authentication.
-- Do not expose the server to untrusted networks without additional security measures.
+---
 
-## 11. Version Information
+## 10. License
 
-**Release:** v1.0.0
+This project is distributed under the MIT License.
 
-This release supports basic end-to-end file transfer with metadata exchange, packet validation, acknowledgements, and SHA-256 verification.
+Refer to the `LICENSE` file for the complete license terms.
 
-For architectural details and protocol specifications, refer to [README.md](README.md).
