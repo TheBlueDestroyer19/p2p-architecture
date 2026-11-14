@@ -1,4 +1,4 @@
-# USER GUIDE — P2P File Transfer System
+# USER GUIDE — P2P File Transfer System (v1.2.0)
 
 ## 1. Project Overview
 
